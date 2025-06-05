@@ -34,6 +34,14 @@ class Deformation(nn.Module):
         
         self.ratio=0
         self.create_net()
+        # 潜在コードから補正量を出力する MLP
+        self.latent_code_mlp = nn.Sequential(
+            nn.Linear(args.latent_dim, self.W),
+            nn.ReLU(),
+            nn.Linear(self.W, self.W),
+            nn.ReLU(),
+            nn.Linear(self.W, 3 + 3 + 4 + 1)  # 位置(3) + スケール(3) + 回転(4) + 不透明度(1)
+        )
     @property
     def get_aabb(self):
         return self.grid.get_aabb
@@ -84,18 +92,50 @@ class Deformation(nn.Module):
     @property
     def get_empty_ratio(self):
         return self.ratio
-    def forward(self, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity = None,shs_emb=None, time_feature=None, time_emb=None):
+    def forward(self, rays_pts_emb, scales_emb=None, rotations_emb=None, opacity = None,shs_emb=None, time_feature=None, time_emb=None, latent_code=None, iteration=None):
         if time_emb is None:
             return self.forward_static(rays_pts_emb[:,:3])
         else:
-            return self.forward_dynamic(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, time_feature, time_emb)
+            return self.forward_dynamic(rays_pts_emb, scales_emb, rotations_emb, opacity, shs_emb, time_feature, time_emb, latent_code, iteration)
 
     def forward_static(self, rays_pts_emb):
         grid_feature = self.grid(rays_pts_emb[:,:3])
         dx = self.static_mlp(grid_feature)
         return rays_pts_emb[:, :3] + dx
-    def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_feature, time_emb):
+    def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_feature, time_emb, latent_code=None, iteration=None):
         hidden = self.query_time(rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb)
+
+        # 潜在コードを使って補正量を計算
+        if latent_code is not None:
+            correction = self.latent_code_mlp(latent_code)  # [batch_size, 11]
+            delta_pos, delta_scale, delta_rot, delta_opacity = torch.split(correction, [3, 3, 4, 1], dim=-1)
+        else:
+            batch_size = rays_pts_emb.shape[0]
+            delta_pos = torch.zeros(batch_size, 3, device=rays_pts_emb.device)
+            delta_scale = torch.zeros(batch_size, 3, device=rays_pts_emb.device)
+            delta_rot = torch.zeros(batch_size, 4, device=rays_pts_emb.device)
+            delta_opacity = torch.zeros(batch_size, 1, device=rays_pts_emb.device)
+
+        # 各補正量に異なるスケーリング係数を設定
+        scale_factor_pos = 0.01     # 位置補正用スケーリング係数
+        scale_factor_scale = 0.05    # スケール補正用スケーリング係数
+        scale_factor_rot = 0.01     # 回転補正用スケーリング係数
+        scale_factor_opacity = 0.01 # 不透明度補正用スケーリング係数
+
+        # 補正量にスケーリングを適用
+        delta_pos = scale_factor_pos * delta_pos
+        delta_scale = scale_factor_scale * delta_scale
+        delta_rot = scale_factor_rot * delta_rot
+        delta_opacity = scale_factor_opacity * delta_opacity
+
+        # 一定間隔（1000回ごと）で補正量を出力
+        if iteration is not None and iteration % 1000 == 0:  # 1000イテレーションごとに出力
+            print(f"Iteration: {iteration}")
+            print(f"delta_pos mean: {delta_pos.mean().item()}, std: {delta_pos.std().item()}")
+            print(f"delta_scale mean: {delta_scale.mean().item()}, std: {delta_scale.std().item()}")
+            print(f"delta_rot mean: {delta_rot.mean().item()}, std: {delta_rot.std().item()}")
+            print(f"delta_opacity mean: {delta_opacity.mean().item()}, std: {delta_opacity.std().item()}, min: {delta_opacity.min().item()}, max: {delta_opacity.max().item()}")
+
         if self.args.static_mlp:
             mask = self.static_mlp(hidden)
         elif self.args.empty_voxel:
@@ -106,14 +146,14 @@ class Deformation(nn.Module):
         if self.args.no_dx:
             pts = rays_pts_emb[:,:3]
         else:
-            dx = self.pos_deform(hidden)
+            dx = self.pos_deform(hidden) + delta_pos
             pts = torch.zeros_like(rays_pts_emb[:,:3])
             pts = rays_pts_emb[:,:3]*mask + dx
         if self.args.no_ds :
             
             scales = scales_emb[:,:3]
         else:
-            ds = self.scales_deform(hidden)
+            ds = self.scales_deform(hidden) + delta_scale
 
             scales = torch.zeros_like(scales_emb[:,:3])
             scales = scales_emb[:,:3]*mask + ds
@@ -121,7 +161,7 @@ class Deformation(nn.Module):
         if self.args.no_dr :
             rotations = rotations_emb[:,:4]
         else:
-            dr = self.rotations_deform(hidden)
+            dr = self.rotations_deform(hidden) + delta_rot
 
             rotations = torch.zeros_like(rotations_emb[:,:4])
             if self.args.apply_rotation:
@@ -132,7 +172,7 @@ class Deformation(nn.Module):
         if self.args.no_do :
             opacity = opacity_emb[:,:1] 
         else:
-            do = self.opacity_deform(hidden) 
+            do = self.opacity_deform(hidden) + delta_opacity
           
             opacity = torch.zeros_like(opacity_emb[:,:1])
             opacity = opacity_emb[:,:1]*mask + do
@@ -182,8 +222,8 @@ class deform_network(nn.Module):
         self.apply(initialize_weights)
         # print(self)
 
-    def forward(self, point, scales=None, rotations=None, opacity=None, shs=None, times_sel=None):
-        return self.forward_dynamic(point, scales, rotations, opacity, shs, times_sel)
+    def forward(self, point, scales=None, rotations=None, opacity=None, shs=None, times_sel=None, latent_code=None, iteration=None):
+        return self.forward_dynamic(point, scales, rotations, opacity, shs, times_sel, latent_code, iteration)
     @property
     def get_aabb(self):
         
@@ -195,7 +235,7 @@ class deform_network(nn.Module):
     def forward_static(self, points):
         points = self.deformation_net(points)
         return points
-    def forward_dynamic(self, point, scales=None, rotations=None, opacity=None, shs=None, times_sel=None):
+    def forward_dynamic(self, point, scales=None, rotations=None, opacity=None, shs=None, times_sel=None, latent_code=None, iteration=None):
         # times_emb = poc_fre(times_sel, self.time_poc)
         point_emb = poc_fre(point,self.pos_poc)
         scales_emb = poc_fre(scales,self.rotation_scaling_poc)
@@ -208,7 +248,7 @@ class deform_network(nn.Module):
                                                 opacity,
                                                 shs,
                                                 None,
-                                                times_sel)
+                                                times_sel, latent_code, iteration)
         return means3D, scales, rotations, opacity, shs
     def get_mlp_parameters(self):
         return self.deformation_net.get_mlp_parameters() + list(self.timenet.parameters())

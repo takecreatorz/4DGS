@@ -30,6 +30,8 @@ import lpips
 from utils.scene_utils import render_training_image
 from time import time
 import copy
+import torch
+import torch.nn as nn
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
@@ -40,7 +42,7 @@ except ImportError:
     TENSORBOARD_FOUND = False
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer):
+                         gaussians, scene, stage, tb_writer, train_iter,timer, latent_code_embedding=None):
     first_iter = 0
 
     gaussians.training_setup(opt)
@@ -178,7 +180,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         visibility_filter_list = []
         viewspace_point_tensor_list = []
         for viewpoint_cam in viewpoint_cams:
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
+            if latent_code_embedding is not None:
+                frame_id = viewpoint_cam.uid
+                latent_code = latent_code_embedding(torch.tensor(frame_id, device="cuda"))
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage, cam_type=scene.dataset_type, latent_code=latent_code, iteration=iteration)
+            else:
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage, cam_type=scene.dataset_type)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             images.append(image.unsqueeze(0))
             if scene.dataset_type!="PanopticSports":
@@ -209,6 +216,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
             loss += tv_loss
+            # 潜在コードの L2 正則化を損失に追加
+            latent_reg_loss = 1e-3 * torch.sum(latent_code ** 2)
+            loss += latent_reg_loss
         if opt.lambda_dssim != 0:
             ssim_loss = ssim(image_tensor,gt_image_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
@@ -301,13 +311,20 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     dataset.model_path = args.model_path
     timer = Timer()
     scene = Scene(dataset, gaussians, load_coarse=None)
+
+    # 潜在コード管理用の nn.Embedding（各フレームごとに潜在コードを保持）
+    num_frames = len(scene.getTrainCameras())  # データセット内の総フレーム数を取得
+    latent_dim = hyper.latent_dim  # hyper から latent_dim を取得
+    latent_code_embedding = nn.Embedding(num_frames, latent_dim).to("cuda")
+    nn.init.zeros_(latent_code_embedding.weight)
+
     timer.start()
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                              checkpoint_iterations, checkpoint, debug_from,
                              gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer)
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, opt.iterations,timer)
+                         gaussians, scene, "fine", tb_writer, opt.iterations,timer, latent_code_embedding)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
