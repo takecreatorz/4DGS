@@ -1,11 +1,47 @@
+# Byte-compiled / optimized / DLL files
 *.pyc
-.vscode
-output
-build
-diff_rasterization/diff_rast.egg-info
-diff_rasterization/dist
-tensorboard_3d
-screenshots
+*.pyd
+*.so
+
+# C extensions
+*.dll
+*.exe
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# VS Code
+.vscode/
+
+# Project-specific outputs & data
+output/
+outputs/
+tensorboard_3d/
+screenshots/
 data/
-data
-submodules/
+submodules/diff-gaussian-rasterization/third_party/
+
+# Viewer application and its artifacts
+viewers/bin/
+viewers/shaders/core/
+viewers/resources/core/
+
+# Rasterizer build artifacts
+diff_rasterization/diff_rast.egg-info
+submodules/diff-gaussian-rasterization/build/
