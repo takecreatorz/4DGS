@@ -244,6 +244,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage)
+
+            # Save canonical Gaussians at 3000 iterations
+            if iteration == 3000:
+                print("\n[ITER 3000] Saving canonical Gaussians after warm-up.")
+                scene.save(iteration, "canonical_warmup")
+
             if dataset.render_process:
                 if (iteration < 1000 and iteration % 10 == 9) \
                     or (iteration < 3000 and iteration % 50 == 49) \

@@ -134,7 +134,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int, model_path: str):
         self.spatial_lr_scale = spatial_lr_scale
         # breakpoint()
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
@@ -162,6 +162,14 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+
+        # Save the initial Gaussians to a .ply file
+        print("Saving initial Gaussians...")
+        initial_dir = os.path.join(model_path, "initial_point_cloud", "initial")
+        mkdir_p(initial_dir)
+        initial_ply_path = os.path.join(initial_dir, "point_cloud.ply")
+        self.save_ply(initial_ply_path) # Use save_ply which already handles directory creation
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
