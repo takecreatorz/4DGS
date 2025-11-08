@@ -176,10 +176,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         gt_images = []
         radii_list = []
         visibility_filter_list = []
+        scales_list = [] # For scale regularization
+        delta_xyz_list = [] # For dynamic penalty
         viewspace_point_tensor_list = []
         for viewpoint_cam in viewpoint_cams:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
-            image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            image, viewspace_point_tensor, visibility_filter, radii, opacities = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["opacities"]
             images.append(image.unsqueeze(0))
             if scene.dataset_type!="PanopticSports":
                 gt_image = viewpoint_cam.original_image.cuda()
@@ -189,6 +191,11 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             gt_images.append(gt_image.unsqueeze(0))
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
+            if "scales" in render_pkg:
+                scales_list.append(render_pkg["scales"].unsqueeze(0)) # Collect scales
+            if "delta_xyz" in render_pkg:
+                delta_xyz_list.append(render_pkg["delta_xyz"].unsqueeze(0)) # Collect delta_xyz
+            # opacities_list.append(opacities.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
         
 
@@ -196,6 +203,13 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
         gt_image_tensor = torch.cat(gt_images,0)
+        if scales_list:
+            scales_tensor = torch.cat(scales_list, 0).mean(dim=0) # Average scales over batch
+        else:
+            scales_tensor = None
+        if delta_xyz_list:
+            delta_xyz_tensor = torch.cat(delta_xyz_list, 0).mean(dim=0) # Average delta_xyz over batch
+        
         # Loss
         # breakpoint()
         Ll1 = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
@@ -212,6 +226,42 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         if opt.lambda_dssim != 0:
             ssim_loss = ssim(image_tensor,gt_image_tensor)
             loss += opt.lambda_dssim * (1.0-ssim_loss)
+
+        # --- Add Scale Regularization Loss ---
+        ## You can add a new hyperparameter for this weight.
+        ## Apply scale regularization only in the fine stage for stability.
+        if stage == "fine":
+            #--- all gaussians scale Regularization  ---
+            lambda_scale_reg = 0.01
+            if lambda_scale_reg > 0:
+            #    # Penalize the max scale of each Gaussian if it exceeds a threshold
+                max_scales, _ = torch.max(scales_tensor, dim=1)
+            #    # Penalize scales larger than a certain threshold (e.g., 0.1)
+                scale_loss = torch.mean(torch.clamp(max_scales - 0.1, min=0))
+                loss += lambda_scale_reg * scale_loss
+
+            # --- Opacity Regularization to prevent ghosting ---
+            lambda_opacity_reg = 0.015 # 新しいハイパーパラメータ
+            if lambda_opacity_reg > 0:
+                opacity_loss = torch.mean(torch.clamp(0.1 - opacities, min=0)) # 閾値0.05より小さい不透明度にペナルティ
+                loss += lambda_opacity_reg * opacity_loss
+            # --- Dynamic Scale Regularization ---
+            #base_lambda_scale_reg = 0.3 # Max penalty weight
+            #motion_threshold = 0.01 # Threshold to start penalizing
+
+            #with torch.no_grad(): # Don't backprop through lambda calculation
+            #    motion_magnitude = torch.linalg.norm(delta_xyz_tensor, dim=-1)
+            #    # Weight lambda based on how much motion exceeds the threshold
+            #    lambda_motion = torch.clamp(motion_magnitude - motion_threshold, min=0.0)
+
+            # Penalize the max scale of each Gaussian
+            #max_scales, _ = torch.max(scales_tensor, dim=1)
+            #scale_exceedance = torch.clamp(max_scales - 0.1, min=0) # 0.1 is scale threshold
+            
+            ## Apply dynamic penalty
+            #scale_loss = torch.mean(lambda_motion * scale_exceedance)
+            #loss += base_lambda_scale_reg * scale_loss
+        # --- End Scale Regularization ---
         # if opt.lambda_lpips !=0:
         #     lpipsloss = lpips_loss(image_tensor,gt_image_tensor,lpips_model)
         #     loss += opt.lambda_lpips * lpipsloss

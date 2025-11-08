@@ -78,15 +78,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         rotations = pc._rotation
     deformation_point = pc._deformation_table
     if "coarse" in stage:
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final = means3D, scales, rotations, opacity, shs
+        means3D_final = means3D
+        scales_final, rotations_final, opacity_final, shs_final = scales, rotations, opacity, shs
+        delta_xyz = torch.zeros_like(means3D)
     elif "fine" in stage:
         # time0 = get_time()
         # means3D_deform, scales_deform, rotations_deform, opacity_deform = pc._deformation(means3D[deformation_point], scales[deformation_point], 
         #                                                                  rotations[deformation_point], opacity[deformation_point],
         #                                                                  time[deformation_point])
         means3D_final, scales_final, rotations_final, opacity_final, shs_final = pc._deformation(means3D, scales, 
-                                                                 rotations, opacity, shs,
-                                                                 time)
+                                                                 rotations, opacity, shs, time)
+        delta_xyz = means3D_final - means3D
     else:
         raise NotImplementedError
 
@@ -95,8 +97,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # time2 = get_time()
     # print("asset value:",time2-time1)
     scales_final = pc.scaling_activation(scales_final)
-    rotations_final = pc.rotation_activation(rotations_final)
-    opacity = pc.opacity_activation(opacity_final)
+    rotations_final = pc.rotation_activation(rotations_final) # [N, 4]
+    opacity = pc.opacity_activation(opacity_final) # [N, 1]
     # print(opacity.max())
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -135,5 +137,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "depth":depth}
-
+            "depth":depth,
+            "scales": scales_final, # for scale regularization
+            "opacities": opacity, # for opacity regularization
+            "delta_xyz": delta_xyz} # for motion regularization

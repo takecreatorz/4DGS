@@ -59,10 +59,21 @@ class Deformation(nn.Module):
             self.feature_out.append(nn.Linear(self.W,self.W))
         self.feature_out = nn.Sequential(*self.feature_out)
         self.pos_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
-        self.scales_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3))
         self.rotations_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4))
-        self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
+
+        # --- Motion-Aware機構の定義 ---
+        motion_feature_dim = 16  # 動き特徴量の次元数（ハイパーパラメータ）
+        motion_encoder_hidden_dim = 16 # この値が16で最適化された
+        self.motion_encoder_mlp = nn.Sequential(
+            nn.Linear(1, motion_encoder_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(motion_encoder_hidden_dim, motion_feature_dim)
+        ) # 入力次元を1（ノルム）に変更
+        # Scaling Head と Opacity Head の両方にMotion-Awareを適用
+        self.scales_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W + motion_feature_dim, self.W),nn.ReLU(),nn.Linear(self.W, 3))
+        self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W + motion_feature_dim, self.W),nn.ReLU(),nn.Linear(self.W, 1))
+        # --- ここまで ---
 
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
@@ -109,15 +120,35 @@ class Deformation(nn.Module):
             dx = self.pos_deform(hidden)
             pts = torch.zeros_like(rays_pts_emb[:,:3])
             pts = rays_pts_emb[:,:3]*mask + dx
+
         if self.args.no_ds :
-            
             scales = scales_emb[:,:3]
         else:
-            ds = self.scales_deform(hidden)
+            # 動き特徴量を一度だけ計算
+            motion_magnitude = torch.linalg.norm(dx, dim=-1, keepdim=True)
+            motion_feature = self.motion_encoder_mlp(motion_magnitude.detach())
+            fused_features = torch.cat([hidden, motion_feature], dim=-1)
+            
+            ds = self.scales_deform(fused_features)
 
             scales = torch.zeros_like(scales_emb[:,:3])
             scales = scales_emb[:,:3]*mask + ds
             
+        if self.args.no_do :
+            opacity = opacity_emb[:,:1] 
+        else:
+            # 計算済みのfused_featuresを再利用
+            do = self.opacity_deform(fused_features)
+
+            opacity = torch.zeros_like(opacity_emb[:,:1])
+            opacity = opacity_emb[:,:1]*mask + do
+        if self.args.no_dshs:
+            shs = shs_emb
+        else:
+            dshs = self.shs_deform(hidden).reshape([shs_emb.shape[0],16,3])
+            shs = torch.zeros_like(shs_emb)
+            shs = shs_emb*mask.unsqueeze(-1) + dshs
+
         if self.args.no_dr :
             rotations = rotations_emb[:,:4]
         else:
@@ -128,22 +159,6 @@ class Deformation(nn.Module):
                 rotations = batch_quaternion_multiply(rotations_emb, dr)
             else:
                 rotations = rotations_emb[:,:4] + dr
-
-        if self.args.no_do :
-            opacity = opacity_emb[:,:1] 
-        else:
-            do = self.opacity_deform(hidden) 
-          
-            opacity = torch.zeros_like(opacity_emb[:,:1])
-            opacity = opacity_emb[:,:1]*mask + do
-        if self.args.no_dshs:
-            shs = shs_emb
-        else:
-            dshs = self.shs_deform(hidden).reshape([shs_emb.shape[0],16,3])
-
-            shs = torch.zeros_like(shs_emb)
-            # breakpoint()
-            shs = shs_emb*mask.unsqueeze(-1) + dshs
 
         return pts, scales, rotations, opacity, shs
     def get_mlp_parameters(self):
