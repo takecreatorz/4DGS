@@ -102,6 +102,8 @@ class ModelHiddenParams(ParamGroup):
         self.grid_pe=0 # useless, I was trying to add positional encoding to hexplane's features
         self.static_mlp=False # useless
         self.apply_rotation=False # useless
+        self.lambda_s = 1.0
+        self.lambda_b = 0.0
 
         
         super().__init__(parser, "ModelHiddenParams")
@@ -116,6 +118,7 @@ class OptimizationParams(ParamGroup):
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
+        self.lr_time_center = 0.00000016
         self.position_lr_max_steps = 20_000
         self.deformation_lr_init = 0.00016
         self.deformation_lr_final = 0.000016

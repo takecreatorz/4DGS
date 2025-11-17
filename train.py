@@ -177,8 +177,33 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
+
         for viewpoint_cam in viewpoint_cams:
+            # --- Soft transition from global to local time ---
+            global_time = viewpoint_cam.time
+            use_local_time = False
+
+            if stage == "fine" and iteration > 3000:
+                use_local_time = True
+                # Define the annealing period
+                start_iter = 3000
+                end_iter = 6000
+
+                # Calculate alpha for interpolation
+                alpha = min(1.0, (iteration - start_iter) / (end_iter - start_iter))
+
+                # Calculate local time
+                time_center = gaussians.get_time_center
+                local_time = (hyper.lambda_s * global_time + hyper.lambda_b) - time_center
+
+                # Interpolate between global and local time
+                interpolated_time = (1.0 - alpha) * global_time + alpha * local_time
+                viewpoint_cam.time = interpolated_time
+            
             render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
+            
+            if use_local_time:
+                viewpoint_cam.time = global_time # Restore global time for safety
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             images.append(image.unsqueeze(0))
             if scene.dataset_type!="PanopticSports":

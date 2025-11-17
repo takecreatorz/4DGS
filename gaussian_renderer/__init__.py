@@ -49,10 +49,21 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             prefiltered=False,
             debug=pipe.debug
         )
-        time = torch.tensor(viewpoint_camera.time).to(means3D.device).repeat(means3D.shape[0],1)
+        # Handle both scalar time (original) and per-Gaussian time (time_center)
+        time_input = viewpoint_camera.time
+        if isinstance(time_input, torch.Tensor):
+            # time_input is already a per-Gaussian tensor [N, 1]
+            time = time_input.to(means3D.device)
+        else:
+            # time_input is a global scalar, repeat for each Gaussian
+            time = torch.tensor(time_input).to(means3D.device).repeat(means3D.shape[0], 1)
     else:
         raster_settings = viewpoint_camera['camera']
-        time=torch.tensor(viewpoint_camera['time']).to(means3D.device).repeat(means3D.shape[0],1)
+        time_input = viewpoint_camera['time']
+        if isinstance(time_input, torch.Tensor):
+            time = time_input.to(means3D.device)
+        else:
+            time = torch.tensor(time_input).to(means3D.device).repeat(means3D.shape[0], 1)
         
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -136,4 +147,3 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "visibility_filter" : radii > 0,
             "radii": radii,
             "depth":depth}
-
