@@ -91,7 +91,7 @@ class Scene:
                                                     "iteration_" + str(self.loaded_iter),
                                                    ))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime, self.model_path)
 
     def save(self, iteration, stage):
         if stage == "coarse":
@@ -99,6 +99,9 @@ class Scene:
 
         else:
             point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+        if stage == "canonical_warmup":
+            point_cloud_path = os.path.join(self.model_path, "initial_point_cloud/canonical_iteration_{}".format(iteration))
+
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
     def getTrainCameras(self, scale=1.0):

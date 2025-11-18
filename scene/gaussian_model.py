@@ -134,7 +134,7 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int, model_path: str):
         self.spatial_lr_scale = spatial_lr_scale
         # breakpoint()
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
@@ -162,6 +162,14 @@ class GaussianModel:
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
+
+        # Save the initial Gaussians to a .ply file
+        print("Saving initial Gaussians...")
+        initial_dir = os.path.join(model_path, "initial_point_cloud", "initial")
+        mkdir_p(initial_dir)
+        initial_ply_path = os.path.join(initial_dir, "point_cloud.ply")
+        self.save_ply(initial_ply_path) # Use save_ply which already handles directory creation
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -171,7 +179,7 @@ class GaussianModel:
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+            {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation_base"},
             {'params': list(self._deformation.get_grid_parameters()), 'lr': training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
@@ -180,6 +188,10 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
             
         ]
+        # Add DDDM parameters with a separate learning rate
+        dddm_params = list(self._deformation.get_dddm_parameters())
+        if dddm_params:
+            l.append({'params': dddm_params, 'lr': training_args.dddm_lr_init * self.spatial_lr_scale, "name": "deformation_dddm"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -193,7 +205,11 @@ class GaussianModel:
         self.grid_scheduler_args = get_expon_lr_func(lr_init=training_args.grid_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.deformation_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)    
+                                                    max_steps=training_args.position_lr_max_steps)
+        self.dddm_scheduler_args = get_expon_lr_func(lr_init=training_args.dddm_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.dddm_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -206,8 +222,12 @@ class GaussianModel:
                 lr = self.grid_scheduler_args(iteration)
                 param_group['lr'] = lr
                 # return lr
-            elif param_group["name"] == "deformation":
+            elif param_group["name"] == "deformation_base":
                 lr = self.deformation_scheduler_args(iteration)
+                param_group['lr'] = lr
+                # return lr
+            elif param_group["name"] == "deformation_dddm":
+                lr = self.dddm_scheduler_args(iteration)
                 param_group['lr'] = lr
                 # return lr
 

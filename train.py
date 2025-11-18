@@ -177,8 +177,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         radii_list = []
         visibility_filter_list = []
         viewspace_point_tensor_list = []
+        f_coeffs_list = []
         for viewpoint_cam in viewpoint_cams:
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background, stage=stage,cam_type=scene.dataset_type, hp=hyper)
             image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
             images.append(image.unsqueeze(0))
             if scene.dataset_type!="PanopticSports":
@@ -190,6 +191,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
+            if "f_coeffs" in render_pkg and render_pkg["f_coeffs"] is not None:
+                f_coeffs_list.append(render_pkg["f_coeffs"])
         
 
         radii = torch.cat(radii_list,0).max(dim=0).values
@@ -205,6 +208,11 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
 
         loss = Ll1
+        if opt.lambda_dddm_l2 > 0 and f_coeffs_list:
+            f_coeffs_tensor = torch.cat(f_coeffs_list, dim=0)
+            l2_loss_dddm = f_coeffs_tensor.pow(2).mean()
+            loss += opt.lambda_dddm_l2 * l2_loss_dddm
+
         if stage == "fine" and hyper.time_smoothness_weight != 0:
             # tv_loss = 0
             tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
@@ -244,6 +252,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration, stage)
+
+            # Save canonical Gaussians at 3000 iterations
+            if iteration == 3000:
+                print("\n[ITER 3000] Saving canonical Gaussians after warm-up.")
+                scene.save(iteration, "canonical_warmup")
+
             if dataset.render_process:
                 if (iteration < 1000 and iteration % 10 == 9) \
                     or (iteration < 3000 and iteration % 50 == 49) \
