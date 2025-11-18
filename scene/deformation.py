@@ -25,6 +25,7 @@ class Deformation(nn.Module):
         self.no_grid = args.no_grid
         self.grid = HexPlaneField(args.bounds, args.kplanes_config, args.multires)
         # breakpoint()
+        self.fourier_order_L = args.fourier_order_L
         self.args = args
         # self.args.empty_voxel=True
         if self.args.empty_voxel:
@@ -64,6 +65,12 @@ class Deformation(nn.Module):
         self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
 
+        # Head 2 (Residual / DDDM)
+        if self.fourier_order_L > 0:
+            self.pos_deform_fourier = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 3 * self.fourier_order_L * 2))
+            self.scales_deform_fourier = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 3 * self.fourier_order_L * 2))
+            self.rotations_deform_fourier = nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, 4 * self.fourier_order_L * 2))
+
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
         if self.no_grid:
@@ -94,6 +101,23 @@ class Deformation(nn.Module):
         grid_feature = self.grid(rays_pts_emb[:,:3])
         dx = self.static_mlp(grid_feature)
         return rays_pts_emb[:, :3] + dx
+
+    def calculate_fourier_residual(self, t, f, L):
+        # f has shape [N, C, L*2] where C is the dimension of the attribute (e.g., 3 for xyz)
+        if L == 0:
+            return torch.zeros_like(t.expand(*f.shape[:-1]))
+
+        # Reshape f to [N, C, L, 2] for sin and cos coefficients
+        f = f.view(*f.shape[:-1], L, 2)
+        f_sin = f[..., 0] # [N, C, L]
+        f_cos = f[..., 1] # [N, C, L]
+
+        l_values = torch.arange(1, L + 1, device=t.device).float() # [L]
+        t_scaled = 2 * torch.pi * l_values * t.unsqueeze(-1) # [N, 1, L]
+
+        residual = torch.sum(f_sin * torch.sin(t_scaled) + f_cos * torch.cos(t_scaled), dim=-1) # [N, C]
+        return residual
+
     def forward_dynamic(self,rays_pts_emb, scales_emb, rotations_emb, opacity_emb, shs_emb, time_feature, time_emb):
         hidden = self.query_time(rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb)
         if self.args.static_mlp:
@@ -103,32 +127,58 @@ class Deformation(nn.Module):
         else:
             mask = torch.ones_like(opacity_emb[:,0]).unsqueeze(-1)
         # breakpoint()
-        if self.args.no_dx:
-            pts = rays_pts_emb[:,:3]
-        else:
-            dx = self.pos_deform(hidden)
-            pts = torch.zeros_like(rays_pts_emb[:,:3])
-            pts = rays_pts_emb[:,:3]*mask + dx
-        if self.args.no_ds :
-            
-            scales = scales_emb[:,:3]
-        else:
-            ds = self.scales_deform(hidden)
 
-            scales = torch.zeros_like(scales_emb[:,:3])
-            scales = scales_emb[:,:3]*mask + ds
+        # Head 1 (Base)
+        if self.args.no_dx:
+            dx_base = torch.zeros_like(rays_pts_emb[:,:3])
+        else:
+            dx_base = self.pos_deform(hidden)
+
+        if self.args.no_ds :
+            ds_base = torch.zeros_like(scales_emb[:,:3])
+        else:
+            ds_base = self.scales_deform(hidden)
             
         if self.args.no_dr :
-            rotations = rotations_emb[:,:4]
+            dr_base = torch.zeros_like(rotations_emb[:,:4])
         else:
-            dr = self.rotations_deform(hidden)
+            dr_base = self.rotations_deform(hidden)
 
-            rotations = torch.zeros_like(rotations_emb[:,:4])
-            if self.args.apply_rotation:
-                rotations = batch_quaternion_multiply(rotations_emb, dr)
-            else:
-                rotations = rotations_emb[:,:4] + dr
+        # Head 2 (Residual / DDDM)
+        dx_residual = torch.zeros_like(dx_base)
+        ds_residual = torch.zeros_like(ds_base)
+        dr_residual = torch.zeros_like(dr_base)
+        all_f_coeffs = []
 
+        if self.fourier_order_L > 0:
+            if not self.args.no_dx:
+                f_x = self.pos_deform_fourier(hidden).view(-1, 3, self.fourier_order_L * 2)
+                all_f_coeffs.append(f_x.view(f_x.shape[0], -1))
+                dx_residual = self.calculate_fourier_residual(time_emb, f_x, self.fourier_order_L)
+
+            if not self.args.no_ds:
+                f_s = self.scales_deform_fourier(hidden).view(-1, 3, self.fourier_order_L * 2)
+                all_f_coeffs.append(f_s.view(f_s.shape[0], -1))
+                ds_residual = self.calculate_fourier_residual(time_emb, f_s, self.fourier_order_L)
+
+            if not self.args.no_dr:
+                f_r = self.rotations_deform_fourier(hidden).view(-1, 4, self.fourier_order_L * 2)
+                all_f_coeffs.append(f_r.view(f_r.shape[0], -1))
+                dr_residual = self.calculate_fourier_residual(time_emb, f_r, self.fourier_order_L)
+
+        # Final Deformation
+        dx = dx_base + dx_residual
+        ds = ds_base + ds_residual
+        dr = dr_base + dr_residual
+
+        pts = rays_pts_emb[:,:3] * mask + dx
+        scales = scales_emb[:,:3] * mask + ds
+
+        if self.args.apply_rotation:
+            rotations = batch_quaternion_multiply(rotations_emb, dr)
+        else:
+            rotations = rotations_emb[:,:4] + dr
+        
         if self.args.no_do :
             opacity = opacity_emb[:,:1] 
         else:
@@ -145,13 +195,29 @@ class Deformation(nn.Module):
             # breakpoint()
             shs = shs_emb*mask.unsqueeze(-1) + dshs
 
-        return pts, scales, rotations, opacity, shs
+        if all_f_coeffs:
+            f_coeffs_cat = torch.cat(all_f_coeffs, dim=1)
+        else:
+            f_coeffs_cat = None
+
+        return pts, scales, rotations, opacity, shs, f_coeffs_cat
     def get_mlp_parameters(self):
+        """Returns parameters of the base MLP, excluding the DDDM heads."""
         parameter_list = []
         for name, param in self.named_parameters():
-            if  "grid" not in name:
+            if "grid" not in name and "fourier" not in name:
                 parameter_list.append(param)
         return parameter_list
+
+    def get_dddm_parameters(self):
+        """Returns parameters of the new DDDM (Fourier) heads."""
+        parameter_list = []
+        if self.fourier_order_L > 0:
+            for name, param in self.named_parameters():
+                if "fourier" in name:
+                    parameter_list.append(param)
+        return parameter_list
+
     def get_grid_parameters(self):
         parameter_list = []
         for name, param in self.named_parameters():
@@ -202,16 +268,20 @@ class deform_network(nn.Module):
         rotations_emb = poc_fre(rotations,self.rotation_scaling_poc)
         # time_emb = poc_fre(times_sel, self.time_poc)
         # times_feature = self.timenet(time_emb)
-        means3D, scales, rotations, opacity, shs = self.deformation_net( point_emb,
+        means3D, scales, rotations, opacity, shs, f_coeffs = self.deformation_net( point_emb,
                                                   scales_emb,
                                                 rotations_emb,
                                                 opacity,
                                                 shs,
                                                 None,
                                                 times_sel)
-        return means3D, scales, rotations, opacity, shs
+        return means3D, scales, rotations, opacity, shs, f_coeffs
+
     def get_mlp_parameters(self):
-        return self.deformation_net.get_mlp_parameters() + list(self.timenet.parameters())
+        return self.deformation_net.get_mlp_parameters() + list(self.timenet.parameters()) 
+
+    def get_dddm_parameters(self):
+        return self.deformation_net.get_dddm_parameters()
     def get_grid_parameters(self):
         return self.deformation_net.get_grid_parameters()
 

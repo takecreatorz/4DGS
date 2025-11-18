@@ -102,6 +102,7 @@ class ModelHiddenParams(ParamGroup):
         self.grid_pe=0 # useless, I was trying to add positional encoding to hexplane's features
         self.static_mlp=False # useless
         self.apply_rotation=False # useless
+        self.fourier_order_L = 4 # Order for Fourier series in residual head
 
         
         super().__init__(parser, "ModelHiddenParams")
@@ -120,6 +121,8 @@ class OptimizationParams(ParamGroup):
         self.deformation_lr_init = 0.00016
         self.deformation_lr_final = 0.000016
         self.deformation_lr_delay_mult = 0.01
+        self.dddm_lr_init = 0.000016 # LR for DDDM (Fourier) heads
+        self.dddm_lr_final = 0.0000016 # Final LR for DDDM heads
         self.grid_lr_init = 0.0016
         self.grid_lr_final = 0.00016
 
@@ -130,6 +133,7 @@ class OptimizationParams(ParamGroup):
         self.percent_dense = 0.01
         self.lambda_dssim = 0
         self.lambda_lpips = 0
+        self.lambda_dddm_l2 = 1e-4 # L2 regularization for DDDM coefficients
         self.weight_constraint_init= 1
         self.weight_constraint_after = 0.2
         self.weight_decay_iteration = 5000

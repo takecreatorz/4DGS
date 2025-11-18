@@ -179,7 +179,7 @@ class GaussianModel:
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+            {'params': list(self._deformation.get_mlp_parameters()), 'lr': training_args.deformation_lr_init * self.spatial_lr_scale, "name": "deformation_base"},
             {'params': list(self._deformation.get_grid_parameters()), 'lr': training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
@@ -188,6 +188,10 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
             
         ]
+        # Add DDDM parameters with a separate learning rate
+        dddm_params = list(self._deformation.get_dddm_parameters())
+        if dddm_params:
+            l.append({'params': dddm_params, 'lr': training_args.dddm_lr_init * self.spatial_lr_scale, "name": "deformation_dddm"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -201,7 +205,11 @@ class GaussianModel:
         self.grid_scheduler_args = get_expon_lr_func(lr_init=training_args.grid_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.deformation_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)    
+                                                    max_steps=training_args.position_lr_max_steps)
+        self.dddm_scheduler_args = get_expon_lr_func(lr_init=training_args.dddm_lr_init*self.spatial_lr_scale,
+                                                    lr_final=training_args.dddm_lr_final*self.spatial_lr_scale,
+                                                    lr_delay_mult=training_args.deformation_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -214,8 +222,12 @@ class GaussianModel:
                 lr = self.grid_scheduler_args(iteration)
                 param_group['lr'] = lr
                 # return lr
-            elif param_group["name"] == "deformation":
+            elif param_group["name"] == "deformation_base":
                 lr = self.deformation_scheduler_args(iteration)
+                param_group['lr'] = lr
+                # return lr
+            elif param_group["name"] == "deformation_dddm":
+                lr = self.dddm_scheduler_args(iteration)
                 param_group['lr'] = lr
                 # return lr
 
